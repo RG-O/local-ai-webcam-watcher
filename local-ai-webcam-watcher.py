@@ -86,8 +86,11 @@ latest_frame_jpeg = None
 
 stop_event = threading.Event()
 settings_changed_event = threading.Event()
+watching_event = threading.Event()
+watching_event.set()
 
 runtime_state = {
+    "watching": True,
     "camera_connected": False,
     "last_capture_time": None,
     "last_ai_time": None,
@@ -177,6 +180,38 @@ def update_runtime_state(**changes):
 def get_runtime_state():
     with state_lock:
         return dict(runtime_state)
+
+
+def set_watching(enabled):
+    """Start or stop camera monitoring without shutting down the app."""
+    global frame_buffer
+
+    enabled = bool(enabled)
+
+    if enabled:
+        watching_event.set()
+        update_runtime_state(watching=True, last_error="")
+        print("Watching started.")
+    else:
+        watching_event.clear()
+
+        # Force the camera worker to release its RTSP connection promptly.
+        settings_changed_event.set()
+
+        # Discard the rolling batch so old screenshots are not mixed with
+        # new screenshots when watching is started again.
+        with frames_lock:
+            frame_buffer.clear()
+
+        update_runtime_state(
+            watching=False,
+            camera_connected=False,
+        )
+        print("Watching stopped.")
+
+
+def toggle_watching():
+    set_watching(not watching_event.is_set())
 
 
 def get_local_ip():
@@ -513,6 +548,24 @@ def camera_worker():
     next_capture_time = 0.0
 
     while not stop_event.is_set():
+        # When watching is stopped, release the RTSP connection and idle.
+        # The Flask web UI and tray icon remain active so monitoring can be
+        # started again at any time.
+        if not watching_event.is_set():
+            if capture is not None:
+                capture.release()
+                capture = None
+
+            active_url = None
+            update_runtime_state(
+                watching=False,
+                camera_connected=False,
+            )
+            time.sleep(0.1)
+            continue
+
+        update_runtime_state(watching=True)
+
         current = get_settings_snapshot()
         rtsp_url = current["rtsp_url"].strip()
         interval = max(0.1, float(current["screenshot_interval_seconds"]))
@@ -767,6 +820,11 @@ PAGE_TEMPLATE = r"""
     <div class="card">
         <h2>Status</h2>
         <div class="status">
+            <div>Watching:
+                <strong class="{{ 'good' if state.watching else 'bad' }}">
+                    {{ 'Running' if state.watching else 'Stopped' }}
+                </strong>
+            </div>
             <div>Camera:
                 <strong class="{{ 'good' if state.camera_connected else 'bad' }}">
                     {{ 'Connected' if state.camera_connected else 'Disconnected' }}
@@ -793,6 +851,14 @@ PAGE_TEMPLATE = r"""
         {% if state.last_error %}
             <p class="bad"><strong>Last error:</strong> {{ state.last_error }}</p>
         {% endif %}
+
+        <form method="post" action="{{ url_for('toggle_watching_route') }}"
+              style="margin:16px 0; max-width:260px;">
+            <button type="submit">
+                {{ 'Stop Watching' if state.watching else 'Start Watching' }}
+            </button>
+        </form>
+
         <p class="muted">
             LAN address: http://{{ local_ip }}:{{ settings.web_port }}
         </p>
@@ -1048,6 +1114,12 @@ def save_preferences():
     return redirect(url_for("index"))
 
 
+@app.post("/toggle-watching")
+def toggle_watching_route():
+    toggle_watching()
+    return redirect(url_for("index"))
+
+
 @app.get("/latest.jpg")
 def latest_image():
     with frames_lock:
@@ -1129,9 +1201,24 @@ def open_web_ui(icon=None, item=None):
     webbrowser.open(f"http://127.0.0.1:{current['web_port']}")
 
 
+def toggle_watching_from_tray(icon, item):
+    toggle_watching()
+
+    # Refresh callable menu text immediately on platforms that support it.
+    try:
+        icon.update_menu()
+    except Exception:
+        pass
+
+
+def watching_menu_text(item):
+    return "Stop Watching" if watching_event.is_set() else "Start Watching"
+
+
 def quit_app(icon, item):
     print("Shutting down...")
     stop_event.set()
+    watching_event.set()
     icon.stop()
 
 
@@ -1142,6 +1229,7 @@ def tray_worker():
         "RTSP Ollama Monitor",
         menu=pystray.Menu(
             pystray.MenuItem("Open Settings / History", open_web_ui),
+            pystray.MenuItem(watching_menu_text, toggle_watching_from_tray),
             pystray.MenuItem("Quit", quit_app),
         ),
     )
