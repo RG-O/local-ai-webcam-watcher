@@ -67,6 +67,7 @@ DEFAULT_SETTINGS = {
     "ntfy_topic": "",
     "ntfy_title": "RTSP Camera AI Alert",
     "send_latest_image_with_notification": True,
+    "start_watching_on_startup": False,
     "web_port": 5000,
     "max_history_items": 250,
     "jpeg_quality": 85,
@@ -87,10 +88,9 @@ latest_frame_jpeg = None
 stop_event = threading.Event()
 settings_changed_event = threading.Event()
 watching_event = threading.Event()
-watching_event.set()
 
 runtime_state = {
-    "watching": True,
+    "watching": False,
     "camera_connected": False,
     "last_capture_time": None,
     "last_ai_time": None,
@@ -804,6 +804,25 @@ PAGE_TEMPLATE = r"""
             border-radius: 8px;
             border: 1px solid var(--border);
         }
+        .latest-ai {
+            max-width: 640px;
+            margin-top: 12px;
+            padding: 12px;
+            background: rgba(255,255,255,.04);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .latest-ai-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+        .latest-ai-response {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
         .actions {
             display: flex;
             gap: 10px;
@@ -864,6 +883,27 @@ PAGE_TEMPLATE = r"""
         </p>
         <img id="latest-preview" class="preview" src="{{ url_for('latest_image') }}?t={{ cache_buster }}"
              alt="Latest camera screenshot">
+
+        <div class="latest-ai">
+            <div class="latest-ai-header">
+                <strong>Most Recent AI Response</strong>
+                <span id="latest-ai-trigger"
+                      class="pill {{ 'good' if history and history[0].triggered else '' }}">
+                    {{ 'TRIGGERED' if history and history[0].triggered else 'NOT TRIGGERED' }}
+                </span>
+                <span id="latest-ai-time" class="muted">
+                    {{ history[0].timestamp if history else '' }}
+                </span>
+            </div>
+            <div id="latest-ai-response"
+                 class="latest-ai-response {{ 'bad' if history and history[0].error else '' }}">
+                {% if history %}
+                    {{ history[0].error if history[0].error else history[0].response }}
+                {% else %}
+                    No AI responses yet.
+                {% endif %}
+            </div>
+        </div>
     </div>
 
     <div class="card">
@@ -974,6 +1014,16 @@ PAGE_TEMPLATE = r"""
                 </label>
             </div>
 
+            <div class="checkbox-row" style="margin-top:12px;">
+                <input type="checkbox"
+                       name="start_watching_on_startup"
+                       id="start_watching_on_startup"
+                       {{ 'checked' if settings.start_watching_on_startup else '' }}>
+                <label for="start_watching_on_startup" style="margin:0">
+                    Start watching automatically when the program starts
+                </label>
+            </div>
+
             <div style="margin-top:16px">
                 <button type="submit">Save Preferences</button>
             </div>
@@ -1075,7 +1125,32 @@ PAGE_TEMPLATE = r"""
         errorBox.style.display = state.last_error ? '' : 'none';
     }
 
+    function updateLatestAiResponse(history) {
+        const indicator = document.getElementById('latest-ai-trigger');
+        const timestamp = document.getElementById('latest-ai-time');
+        const response = document.getElementById('latest-ai-response');
+
+        if (!history.length) {
+            indicator.textContent = 'NOT TRIGGERED';
+            indicator.className = 'pill';
+            timestamp.textContent = '';
+            response.textContent = 'No AI responses yet.';
+            response.className = 'latest-ai-response';
+            return;
+        }
+
+        const item = history[0];
+        indicator.textContent = item.triggered ? 'TRIGGERED' : 'NOT TRIGGERED';
+        indicator.className = item.triggered ? 'pill good' : 'pill';
+        timestamp.textContent = item.timestamp || '';
+        response.textContent = item.error || item.response || '';
+        response.className = item.error
+            ? 'latest-ai-response bad'
+            : 'latest-ai-response';
+    }
+
     function renderHistory(history) {
+        updateLatestAiResponse(history);
         const container = document.getElementById('history-list');
 
         if (!history.length) {
@@ -1202,6 +1277,9 @@ def save_preferences():
     )
     updated["send_latest_image_with_notification"] = (
         "send_latest_image_with_notification" in request.form
+    )
+    updated["start_watching_on_startup"] = (
+        "start_watching_on_startup" in request.form
     )
 
     with settings_lock:
@@ -1363,6 +1441,12 @@ def main():
     load_history()
 
     current = get_settings_snapshot()
+
+    # Watching is stopped by default. Only start automatically when the
+    # saved startup preference explicitly enables it. This setting is
+    # applied only at program launch; the tray/web controls manage the
+    # current session after that.
+    set_watching(bool(current.get("start_watching_on_startup", False)))
 
     print("RTSP Ollama Monitor")
     print("--------------------")
