@@ -821,40 +821,40 @@ PAGE_TEMPLATE = r"""
         <h2>Status</h2>
         <div class="status">
             <div>Watching:
-                <strong class="{{ 'good' if state.watching else 'bad' }}">
+                <strong id="status-watching" class="{{ 'good' if state.watching else 'bad' }}">
                     {{ 'Running' if state.watching else 'Stopped' }}
                 </strong>
             </div>
             <div>Camera:
-                <strong class="{{ 'good' if state.camera_connected else 'bad' }}">
+                <strong id="status-camera" class="{{ 'good' if state.camera_connected else 'bad' }}">
                     {{ 'Connected' if state.camera_connected else 'Disconnected' }}
                 </strong>
             </div>
-            <div>Captured: <strong>{{ state.capture_count }}</strong></div>
-            <div>AI calls: <strong>{{ state.analysis_count }}</strong></div>
+            <div>Captured: <strong id="status-captured">{{ state.capture_count }}</strong></div>
+            <div>AI calls: <strong id="status-ai-calls">{{ state.analysis_count }}</strong></div>
             <div>AI running:
-                <strong>{{ 'Yes' if state.analysis_in_progress else 'No' }}</strong>
+                <strong id="status-ai-running">{{ 'Yes' if state.analysis_in_progress else 'No' }}</strong>
             </div>
             <div>Last capture:
-                <strong>{{ state.last_capture_time or 'Never' }}</strong>
+                <strong id="status-last-capture">{{ state.last_capture_time or 'Never' }}</strong>
             </div>
             <div>Last AI:
-                <strong>{{ state.last_ai_time or 'Never' }}</strong>
+                <strong id="status-last-ai">{{ state.last_ai_time or 'Never' }}</strong>
             </div>
             <div>Last AI duration:
-                <strong>
+                <strong id="status-last-ai-duration">
                 {{ state.last_ai_duration_seconds ~ ' sec'
                    if state.last_ai_duration_seconds is not none else 'N/A' }}
                 </strong>
             </div>
         </div>
-        {% if state.last_error %}
-            <p class="bad"><strong>Last error:</strong> {{ state.last_error }}</p>
-        {% endif %}
+        <p id="status-error" class="bad" style="{{ '' if state.last_error else 'display:none;' }}">
+            <strong>Last error:</strong> <span id="status-error-text">{{ state.last_error }}</span>
+        </p>
 
         <form method="post" action="{{ url_for('toggle_watching_route') }}"
               style="margin:16px 0; max-width:260px;">
-            <button type="submit">
+            <button id="watching-toggle-button" type="submit">
                 {{ 'Stop Watching' if state.watching else 'Start Watching' }}
             </button>
         </form>
@@ -862,7 +862,7 @@ PAGE_TEMPLATE = r"""
         <p class="muted">
             LAN address: http://{{ local_ip }}:{{ settings.web_port }}
         </p>
-        <img class="preview" src="{{ url_for('latest_image') }}?t={{ cache_buster }}"
+        <img id="latest-preview" class="preview" src="{{ url_for('latest_image') }}?t={{ cache_buster }}"
              alt="Latest camera screenshot">
     </div>
 
@@ -993,6 +993,7 @@ PAGE_TEMPLATE = r"""
             </form>
         </div>
 
+        <div id="history-list">
         {% if history %}
             {% for item in history %}
                 <div class="history-item">
@@ -1010,7 +1011,10 @@ PAGE_TEMPLATE = r"""
                         Model: {{ item.model or 'N/A' }} |
                         Batch: {{ item.batch_size or 'N/A' }} |
                         Duration: {{ item.duration_seconds or 'N/A' }} sec
-                        {% if item.eval_count is defined and item.eval_count %}
+                        {% if item.prompt_eval_count is defined and item.prompt_eval_count is not none %}
+                            | Input tokens: {{ item.prompt_eval_count }}
+                        {% endif %}
+                        {% if item.eval_count is defined and item.eval_count is not none %}
                             | Output tokens: {{ item.eval_count }}
                         {% endif %}
                     </div>
@@ -1031,8 +1035,115 @@ PAGE_TEMPLATE = r"""
         {% else %}
             <p class="muted">No AI responses yet.</p>
         {% endif %}
+        </div>
     </div>
 </div>
+<script>
+    let lastCaptureCount = {{ state.capture_count }};
+    let lastAnalysisCount = {{ state.analysis_count }};
+
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function updateStatus(state) {
+        const watching = document.getElementById('status-watching');
+        watching.textContent = state.watching ? 'Running' : 'Stopped';
+        watching.className = state.watching ? 'good' : 'bad';
+
+        const camera = document.getElementById('status-camera');
+        camera.textContent = state.camera_connected ? 'Connected' : 'Disconnected';
+        camera.className = state.camera_connected ? 'good' : 'bad';
+
+        document.getElementById('status-captured').textContent = state.capture_count;
+        document.getElementById('status-ai-calls').textContent = state.analysis_count;
+        document.getElementById('status-ai-running').textContent = state.analysis_in_progress ? 'Yes' : 'No';
+        document.getElementById('status-last-capture').textContent = state.last_capture_time || 'Never';
+        document.getElementById('status-last-ai').textContent = state.last_ai_time || 'Never';
+        document.getElementById('status-last-ai-duration').textContent =
+            state.last_ai_duration_seconds == null ? 'N/A' : `${state.last_ai_duration_seconds} sec`;
+        document.getElementById('watching-toggle-button').textContent =
+            state.watching ? 'Stop Watching' : 'Start Watching';
+
+        const errorBox = document.getElementById('status-error');
+        document.getElementById('status-error-text').textContent = state.last_error || '';
+        errorBox.style.display = state.last_error ? '' : 'none';
+    }
+
+    function renderHistory(history) {
+        const container = document.getElementById('history-list');
+
+        if (!history.length) {
+            container.innerHTML = '<p class="muted">No AI responses yet.</p>';
+            return;
+        }
+
+        container.innerHTML = history.map(item => {
+            const triggered = item.triggered ? '<span class="pill good">TRIGGERED</span>' : '';
+            const sent = item.notification_sent ? '<span class="pill">ntfy sent</span>' : '';
+            const inputTokens = item.prompt_eval_count != null
+                ? ` | Input tokens: ${escapeHtml(item.prompt_eval_count)}` : '';
+            const outputTokens = item.eval_count != null
+                ? ` | Output tokens: ${escapeHtml(item.eval_count)}` : '';
+            const mainText = item.error
+                ? `<div class="history-response bad">${escapeHtml(item.error)}</div>`
+                : `<div class="history-response">${escapeHtml(item.response)}</div>`;
+            const notificationError = item.notification_error
+                ? `<div class="bad">Notification error: ${escapeHtml(item.notification_error)}</div>` : '';
+
+            return `
+                <div class="history-item">
+                    <strong>${escapeHtml(item.timestamp)}</strong>
+                    ${triggered}
+                    ${sent}
+                    <div class="muted">
+                        Model: ${escapeHtml(item.model || 'N/A')} |
+                        Batch: ${escapeHtml(item.batch_size || 'N/A')} |
+                        Duration: ${escapeHtml(item.duration_seconds ?? 'N/A')} sec
+                        ${inputTokens}${outputTokens}
+                    </div>
+                    ${mainText}
+                    ${notificationError}
+                </div>`;
+        }).join('');
+    }
+
+    async function refreshHistory() {
+        const response = await fetch('{{ url_for("api_history") }}', {cache: 'no-store'});
+        if (!response.ok) return;
+        renderHistory(await response.json());
+    }
+
+    async function refreshLiveData() {
+        try {
+            const response = await fetch('{{ url_for("api_status") }}', {cache: 'no-store'});
+            if (!response.ok) return;
+
+            const state = await response.json();
+            updateStatus(state);
+
+            if (state.capture_count !== lastCaptureCount) {
+                lastCaptureCount = state.capture_count;
+                document.getElementById('latest-preview').src =
+                    '{{ url_for("latest_image") }}?t=' + Date.now();
+            }
+
+            if (state.analysis_count !== lastAnalysisCount) {
+                lastAnalysisCount = state.analysis_count;
+                await refreshHistory();
+            }
+        } catch (error) {
+            console.debug('Live update failed:', error);
+        }
+    }
+
+    setInterval(refreshLiveData, 1000);
+</script>
 </body>
 </html>
 """
@@ -1164,6 +1275,12 @@ def clear_history():
 @app.get("/api/status")
 def api_status():
     return jsonify(get_runtime_state())
+
+
+@app.get("/api/history")
+def api_history():
+    with history_lock:
+        return jsonify(list(history))
 
 
 def web_server_worker():
