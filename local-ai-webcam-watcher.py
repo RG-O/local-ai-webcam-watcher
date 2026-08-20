@@ -1,5 +1,5 @@
 """
-RTSP Ollama Monitor
+Local AI Webcam Monitor
 -------------------
 Connects to an RTSP camera, captures screenshots at a configurable interval,
 sends rolling batches to a local Ollama vision model, and publishes an ntfy
@@ -695,7 +695,7 @@ PAGE_TEMPLATE = r"""
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>RTSP Ollama Monitor</title>
+    <title>Local AI Webcam Monitor</title>
     <style>
         :root {
             color-scheme: light dark;
@@ -834,7 +834,7 @@ PAGE_TEMPLATE = r"""
 </head>
 <body>
 <div class="page">
-    <h1>RTSP Ollama Monitor</h1>
+    <h1>Local AI Webcam Monitor</h1>
 
     <div class="card">
         <h2>Status</h2>
@@ -1329,7 +1329,7 @@ def latest_image():
 def run_test_notification():
     try:
         send_ntfy_notification(
-            "Test notification from RTSP Ollama Monitor.",
+            "Test notification from Local AI Webcam Monitor.",
             None,
         )
         update_runtime_state(last_error="")
@@ -1421,7 +1421,7 @@ def tray_worker():
     icon = pystray.Icon(
         "rtsp_ollama_monitor",
         create_tray_image(),
-        "RTSP Ollama Monitor",
+        "Local AI Webcam Monitor",
         menu=pystray.Menu(
             pystray.MenuItem("Open Settings / History", open_web_ui),
             pystray.MenuItem(watching_menu_text, toggle_watching_from_tray),
@@ -1448,7 +1448,7 @@ def main():
     # current session after that.
     set_watching(bool(current.get("start_watching_on_startup", False)))
 
-    print("RTSP Ollama Monitor")
+    print("Local AI Webcam Monitor")
     print("--------------------")
     print(f"Local web UI: http://127.0.0.1:{current['web_port']}")
     print(f"LAN web UI:   http://{get_local_ip()}:{current['web_port']}")

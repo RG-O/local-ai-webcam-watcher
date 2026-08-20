@@ -1,6 +1,6 @@
-# RTSP Ollama Monitor
+# Local AI Webcam Monitor
 
-A local, self-hosted Python application that watches an RTSP camera,
+A local, self-hosted Python application that watches a camera through its RTSP stream,
 periodically captures screenshots, sends rolling batches of images to a
 local Ollama vision model, and can send an ntfy notification when the AI
 response begins with a configured trigger word.
@@ -20,13 +20,7 @@ starting or stopping monitoring, and reviewing previous AI responses.
 * Sends ntfy notifications when the trigger word is returned
 * Optionally attaches the latest camera screenshot to notifications
 * Stores AI response history locally
-* Displays input tokens, output tokens, and AI response time
-* Shows the latest full AI response directly below the camera preview
-* Clearly indicates whether the latest response triggered an alert
-* Start or stop watching from the web interface
-* Start or stop watching from the system tray menu
 * Optional automatic monitoring when the application starts
-* Live web interface updates without manually refreshing the page
 * Web interface can be accessed by other devices on the local network
 * Persistent settings and response history
 
@@ -69,7 +63,7 @@ Then download a vision model. For example:
 ollama pull qwen2.5vl:7b
 ```
 
-Make sure Ollama is running before starting RTSP Ollama Monitor.
+Make sure Ollama is running before starting Local AI Webcam Monitor.
 
 ### 3\. Download the Script
 
@@ -313,7 +307,7 @@ History can be cleared from the web interface.
 
 ## System Tray
 
-Right-click the RTSP Ollama Monitor system tray icon to access
+Right-click the Local AI Webcam Monitor system tray icon to access
 application controls.
 
 The tray menu includes options to:
