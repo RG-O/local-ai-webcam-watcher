@@ -38,7 +38,7 @@ from pathlib import Path
 import cv2
 import ollama
 import requests
-from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, send_from_directory, url_for
 from PIL import Image, ImageDraw
 import pystray
 
@@ -50,6 +50,7 @@ import pystray
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_FILE = APP_DIR / "settings.json"
 HISTORY_FILE = APP_DIR / "history.json"
+TRIGGER_SCREENSHOTS_DIR = APP_DIR / "trigger_screenshots"
 
 DEFAULT_SETTINGS = {
     "rtsp_url": "rtsp://username:password@192.168.1.100:554/stream1",
@@ -68,6 +69,8 @@ DEFAULT_SETTINGS = {
     "ntfy_title": "RTSP Camera AI Alert",
     "send_latest_image_with_notification": True,
     "start_watching_on_startup": False,
+    "notification_cooldown_seconds": 0.0,
+    "max_saved_trigger_screenshots": 0,
     "web_port": 5000,
     "max_history_items": 250,
     "jpeg_quality": 85,
@@ -88,6 +91,8 @@ latest_frame_jpeg = None
 stop_event = threading.Event()
 settings_changed_event = threading.Event()
 watching_event = threading.Event()
+notification_lock = threading.Lock()
+last_notification_time = None
 
 runtime_state = {
     "watching": False,
@@ -150,6 +155,38 @@ def load_history():
     except Exception as exc:
         print(f"Could not load history.json: {exc}")
         history = []
+
+
+def cleanup_trigger_screenshots(max_saved):
+    """Keep only the newest configured number of saved trigger screenshots."""
+    max_saved = max(0, int(max_saved))
+    if not TRIGGER_SCREENSHOTS_DIR.exists():
+        return
+
+    files = sorted(
+        (path for path in TRIGGER_SCREENSHOTS_DIR.glob("*.jpg") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+    for path in files[max_saved:]:
+        try:
+            path.unlink()
+        except OSError as exc:
+            print(f"Could not delete old trigger screenshot {path.name}: {exc}")
+
+
+def save_trigger_screenshot(image_bytes, max_saved):
+    """Save the newest frame from a triggered batch and enforce the retention limit."""
+    max_saved = max(0, int(max_saved))
+    if max_saved == 0 or not image_bytes:
+        return None
+
+    TRIGGER_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = datetime.now().strftime("trigger-%Y%m%d-%H%M%S-%f.jpg")
+    (TRIGGER_SCREENSHOTS_DIR / filename).write_bytes(image_bytes)
+    cleanup_trigger_screenshots(max_saved)
+    return filename
 
 
 def add_history_item(item):
@@ -438,18 +475,41 @@ def run_ollama_analysis(batch):
 
         notification_sent = False
         notification_error = ""
+        notification_skipped_cooldown = False
+        trigger_screenshot = None
 
         if triggered:
+            # Saving trigger screenshots is independent of whether ntfy is in cooldown.
             try:
-                latest_image = batch[-1] if current.get(
-                    "send_latest_image_with_notification", True
-                ) else None
-
-                send_ntfy_notification(content, latest_image)
-                notification_sent = True
+                trigger_screenshot = save_trigger_screenshot(
+                    batch[-1], current.get("max_saved_trigger_screenshots", 0)
+                )
             except Exception as exc:
-                notification_error = str(exc)
-                print(f"ntfy notification failed: {exc}")
+                print(f"Could not save trigger screenshot: {exc}")
+
+            cooldown = max(0.0, float(current.get("notification_cooldown_seconds", 0)))
+            global last_notification_time
+            with notification_lock:
+                now = time.monotonic()
+                in_cooldown = (
+                    cooldown > 0
+                    and last_notification_time is not None
+                    and now - last_notification_time < cooldown
+                )
+
+                if in_cooldown:
+                    notification_skipped_cooldown = True
+                else:
+                    try:
+                        latest_image = batch[-1] if current.get(
+                            "send_latest_image_with_notification", True
+                        ) else None
+                        send_ntfy_notification(content, latest_image)
+                        notification_sent = True
+                        last_notification_time = time.monotonic()
+                    except Exception as exc:
+                        notification_error = str(exc)
+                        print(f"ntfy notification failed: {exc}")
 
         item = {
             "timestamp": timestamp,
@@ -460,6 +520,8 @@ def run_ollama_analysis(batch):
             "triggered": triggered,
             "notification_sent": notification_sent,
             "notification_error": notification_error,
+            "notification_skipped_cooldown": notification_skipped_cooldown,
+            "trigger_screenshot": trigger_screenshot,
             "batch_size": len(batch),
             "duration_seconds": round(duration, 3),
             "prompt_eval_count": stats["prompt_eval_count"],
@@ -971,6 +1033,21 @@ PAGE_TEMPLATE = r"""
                 </div>
 
                 <div>
+                    <label>Notification Cooldown (seconds)</label>
+                    <input type="number" min="0" step="0.1"
+                           name="notification_cooldown_seconds"
+                           value="{{ settings.notification_cooldown_seconds }}">
+                </div>
+
+                <div>
+                    <label>Maximum Saved Trigger Screenshots</label>
+                    <input type="number" min="0"
+                           name="max_saved_trigger_screenshots"
+                           value="{{ settings.max_saved_trigger_screenshots }}">
+                    <div class="muted" style="font-size:12px;margin-top:4px;">0 = do not save screenshots</div>
+                </div>
+
+                <div>
                     <label>Max Image Width</label>
                     <input type="number" min="64"
                            name="max_image_width"
@@ -1057,6 +1134,10 @@ PAGE_TEMPLATE = r"""
                         <span class="pill">ntfy sent</span>
                     {% endif %}
 
+                    {% if item.notification_skipped_cooldown %}
+                        <span class="pill">ntfy skipped - cooldown</span>
+                    {% endif %}
+
                     <div class="muted">
                         Model: {{ item.model or 'N/A' }} |
                         Batch: {{ item.batch_size or 'N/A' }} |
@@ -1073,6 +1154,12 @@ PAGE_TEMPLATE = r"""
                         <div class="history-response bad">{{ item.error }}</div>
                     {% else %}
                         <div class="history-response">{{ item.response }}</div>
+                    {% endif %}
+
+                    {% if item.trigger_screenshot %}
+                        <img class="preview" style="margin-top:10px;max-width:480px;"
+                             src="{{ url_for('trigger_screenshot', filename=item.trigger_screenshot) }}"
+                             alt="Screenshot that triggered this alert" onerror="this.style.display='none'">
                     {% endif %}
 
                     {% if item.notification_error %}
@@ -1161,6 +1248,9 @@ PAGE_TEMPLATE = r"""
         container.innerHTML = history.map(item => {
             const triggered = item.triggered ? '<span class="pill good">TRIGGERED</span>' : '';
             const sent = item.notification_sent ? '<span class="pill">ntfy sent</span>' : '';
+            const cooldownSkipped = item.notification_skipped_cooldown ? '<span class="pill">ntfy skipped - cooldown</span>' : '';
+            const triggerImage = item.trigger_screenshot
+                ? `<img class="preview" style="margin-top:10px;max-width:480px;" src="/trigger-screenshots/${encodeURIComponent(item.trigger_screenshot)}" alt="Screenshot that triggered this alert" onerror="this.style.display='none'">` : '';
             const inputTokens = item.prompt_eval_count != null
                 ? ` | Input tokens: ${escapeHtml(item.prompt_eval_count)}` : '';
             const outputTokens = item.eval_count != null
@@ -1176,6 +1266,7 @@ PAGE_TEMPLATE = r"""
                     <strong>${escapeHtml(item.timestamp)}</strong>
                     ${triggered}
                     ${sent}
+                    ${cooldownSkipped}
                     <div class="muted">
                         Model: ${escapeHtml(item.model || 'N/A')} |
                         Batch: ${escapeHtml(item.batch_size || 'N/A')} |
@@ -1183,6 +1274,7 @@ PAGE_TEMPLATE = r"""
                         ${inputTokens}${outputTokens}
                     </div>
                     ${mainText}
+                    ${triggerImage}
                     ${notificationError}
                 </div>`;
         }).join('');
@@ -1263,6 +1355,12 @@ def save_preferences():
     updated["ntfy_server"] = request.form.get("ntfy_server", "").strip()
     updated["ntfy_topic"] = request.form.get("ntfy_topic", "").strip()
     updated["ntfy_title"] = request.form.get("ntfy_title", "").strip()
+    updated["notification_cooldown_seconds"] = max(
+        0.0, float(request.form.get("notification_cooldown_seconds", 0))
+    )
+    updated["max_saved_trigger_screenshots"] = max(
+        0, int(request.form.get("max_saved_trigger_screenshots", 0))
+    )
     updated["max_image_width"] = max(
         64, int(request.form.get("max_image_width", 1280))
     )
@@ -1287,6 +1385,7 @@ def save_preferences():
         settings.update(updated)
 
     save_settings()
+    cleanup_trigger_screenshots(updated["max_saved_trigger_screenshots"])
 
     # Signal the camera worker if a camera-sensitive preference changed.
     reconnect_keys = {
@@ -1359,6 +1458,11 @@ def api_status():
 def api_history():
     with history_lock:
         return jsonify(list(history))
+
+
+@app.get("/trigger-screenshots/<path:filename>")
+def trigger_screenshot(filename):
+    return send_from_directory(TRIGGER_SCREENSHOTS_DIR, Path(filename).name)
 
 
 def web_server_worker():
@@ -1441,6 +1545,7 @@ def main():
     load_history()
 
     current = get_settings_snapshot()
+    cleanup_trigger_screenshots(current.get("max_saved_trigger_screenshots", 0))
 
     # Watching is stopped by default. Only start automatically when the
     # saved startup preference explicitly enables it. This setting is
